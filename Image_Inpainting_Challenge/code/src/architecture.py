@@ -43,6 +43,7 @@ class Up(nn.Module):
     def __init__(self, in_channels, out_channels, bilinear=True):
         super().__init__()
 
+        # Bilinearer Upsample ist stabil und erzeugt keine Artefakte (Schachbrettmuster)
         if bilinear:
             self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
             self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
@@ -53,12 +54,14 @@ class Up(nn.Module):
     def forward(self, x1, x2):
         x1 = self.up(x1)
         
+        # Padding, falls Dimensionen durch Pooling ungerade wurden
         diffY = x2.size()[2] - x1.size()[2]
         diffX = x2.size()[3] - x1.size()[3]
 
         x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
                         diffY // 2, diffY - diffY // 2])
         
+        # Skip-Connection (Concatenate)
         x = torch.cat([x2, x1], dim=1)
         return self.conv(x)
 
@@ -77,7 +80,7 @@ class MyModel(nn.Module):
         self.n_classes = n_classes
         self.bilinear = bilinear
 
-        # Encoder
+        # Encoder (Downsampling Pfad)
         self.inc = DoubleConv(n_in_channels, 64)
         self.down1 = Down(64, 128)
         self.down2 = Down(128, 256)
@@ -85,10 +88,11 @@ class MyModel(nn.Module):
         factor = 2 if bilinear else 1
         self.down4 = Down(512, 1024 // factor)
         
-        # Dropout im Bottleneck hilft bei so spärlichen Daten gegen Overfitting
+        # Dropout im "Bottleneck" (Tiefster Punkt des Netzes)
+        # Hilft extrem gut gegen Overfitting, wenn man aus wenigen Pixeln das ganze Bild raten muss.
         self.dropout = nn.Dropout(0.5)
 
-        # Decoder
+        # Decoder (Upsampling Pfad)
         self.up1 = Up(1024, 512 // factor, bilinear)
         self.up2 = Up(512, 256 // factor, bilinear)
         self.up3 = Up(256, 128 // factor, bilinear)
@@ -102,6 +106,7 @@ class MyModel(nn.Module):
         x4 = self.down3(x3)
         x5 = self.down4(x4)
         
+        # Dropout anwenden
         x5 = self.dropout(x5)
         
         x = self.up1(x5, x4)
@@ -110,4 +115,5 @@ class MyModel(nn.Module):
         x = self.up4(x, x1)
         logits = self.outc(x)
         
+        # Sigmoid, damit wir sicher Werte zwischen 0 und 1 bekommen
         return torch.sigmoid(logits)
