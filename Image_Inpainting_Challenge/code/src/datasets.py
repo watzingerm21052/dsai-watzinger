@@ -1,5 +1,5 @@
 """
-    Author: Matthias Watzinger
+    Author: Dein Name
     HTL-Grieskirchen 5. Jahrgang, Schuljahr 2025/26
     datasets.py
 """
@@ -15,15 +15,11 @@ IMAGE_DIMENSION = 100
 
 def create_arrays_from_image(image_array: np.ndarray, offset: tuple, spacing: tuple) -> tuple[np.ndarray, np.ndarray]:
     """
-    Erstellt das maskierte Eingabebild und die Maske selbst basierend auf Offset und Spacing.
-    
-    Args:
-        image_array: Das Originalbild (C, H, W) oder (H, W, C). Wir erwarten hier (C, H, W) nach ToTensor().
-        offset: Tupel (offset_y, offset_x)
-        spacing: Tupel (spacing_y, spacing_x)
-    Returns:
-        image_array: Das maskierte Bild (Pixel auf 0 gesetzt wo Maske 0 ist).
-        known_array: Die Maske (1 wo Pixel bekannt sind, 0 wo sie fehlen).
+    Erstellt den Input und die Maske basierend auf Offset und Spacing.
+    Interpretation laut Abbildung 1:
+    - Die blauen Quadrate im Diagramm sind durch Offset/Spacing definiert -> Das sind die BEKANNTEN Pixel.
+    - Der graue Hintergrund ist "auf 0 gesetzt" -> Das sind die FEHLENDEN Pixel.
+    Wir behalten also nur ein Gitter und müssen den Rest rekonstruieren.
     """
     
     # Sicherstellen, dass wir mit numpy arrays arbeiten
@@ -32,25 +28,20 @@ def create_arrays_from_image(image_array: np.ndarray, offset: tuple, spacing: tu
         
     c, h, w = image_array.shape
     
-    # Maske initialisieren: 1 = Pixel bekannt, 0 = Pixel fehlt
-    known_array = np.ones((1, h, w), dtype=np.float32)
+    # Maske initialisieren: 0 = Pixel fehlt (Hintergrund), 1 = Pixel bekannt (Raster)
+    known_array = np.zeros((1, h, w), dtype=np.float32)
     
     offset_y, offset_x = offset
     spacing_y, spacing_x = spacing
     
-    # Raster anwenden: Setze 0 an den Stellen, die durch Offset und Spacing definiert sind
-    # Slicing Notation: start:stop:step
-    # Wir setzen die Stellen auf 0, wo das Gitter "trifft".
-    # Die Aufgabenstellung sagt: "Bild, mit grauen Pixeln auf 0 gesetzt".
-    # Das bedeutet, an den Rasterpunkten fehlen die Informationen.
-    
-    # Achtung: Numpy Slicing erlaubt direkte Zuweisung auf das Gitter
-    known_array[0, offset_y::spacing_y, offset_x::spacing_x] = 0.0
+    # Raster setzen: An diesen Stellen ist die Information vorhanden (1)
+    # Slicing: start:stop:step
+    known_array[0, offset_y::spacing_y, offset_x::spacing_x] = 1.0
     
     # Das Eingabebild wird maskiert (Pixelwerte an fehlenden Stellen auf 0 setzen)
-    masked_image_array = image_array * known_array
+    input_array = image_array * known_array
     
-    return masked_image_array, known_array
+    return input_array, known_array
 
 
 class ImageDataset(torch.utils.data.Dataset):
@@ -67,18 +58,15 @@ class ImageDataset(torch.utils.data.Dataset):
             if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))
         ])
         
-        # Transformationen: Resize und Tensor-Konvertierung
-        # Data Augmentation (zufälliges Flippen) hilft dem Modell, besser zu generalisieren
+        # Transformationen
         self.transform = transforms.Compose([
             transforms.Resize((IMAGE_DIMENSION, IMAGE_DIMENSION)),
-            transforms.RandomHorizontalFlip(p=0.5), # Augmentation
-            transforms.RandomVerticalFlip(p=0.5),   # Augmentation
-            transforms.ToTensor(), # Konvertiert Bild zu (C, H, W) und Wertebereich [0, 1]
+            # Stärkere Augmentation für bessere Generalisierung bei wenigen Datenpunkten
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomVerticalFlip(p=0.5),
+            transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
+            transforms.ToTensor(), # [0, 1] Range
         ])
-        
-        # Validierung/Test Transformation (ohne Random Flip) falls nötig, 
-        # aber hier für Einfachheit im Training inkludiert.
-        # Für striktere Trennung könnte man separate Transforms übergeben.
 
     def __len__(self):
         return len(self.image_files)
@@ -86,14 +74,17 @@ class ImageDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         img_path = self.image_files[idx]
         
-        # Bild laden und in RGB konvertieren (um Fehler bei RGBA/Graustufen zu vermeiden)
-        image = Image.open(img_path).convert("RGB")
+        try:
+            image = Image.open(img_path).convert("RGB")
+        except:
+            # Fallback falls ein Bild korrupt ist
+            return self.__getitem__((idx + 1) % len(self))
         
-        # Transformationen anwenden (gibt Tensor (3, 100, 100) zurück)
         target_tensor = self.transform(image)
         
         # Zufällige Parameter für Offset (0-8) und Spacing (2-6) wählen
-        # Aufgabenstellung: "ganzzahlig zwischen 0 und 8" ->randint(0, 8) ist inklusiv
+        # Spacing 2-6 bedeutet wir behalten nur jeden 2. bis 6. Pixel!
+        # Das Bild besteht also zu 75% bis 97% aus schwarzen Löchern.
         offset_y = random.randint(0, 8)
         offset_x = random.randint(0, 8)
         spacing_y = random.randint(2, 6)
@@ -102,16 +93,12 @@ class ImageDataset(torch.utils.data.Dataset):
         offset = (offset_y, offset_x)
         spacing = (spacing_y, spacing_x)
         
-        # Maskierung anwenden
-        # image_array ist hier der target_tensor als numpy array
         masked_image_np, mask_np = create_arrays_from_image(target_tensor, offset, spacing)
         
-        # Zurück zu Tensor konvertieren
         masked_image_tensor = torch.from_numpy(masked_image_np)
         mask_tensor = torch.from_numpy(mask_np)
         
-        # Input für das Netz: Concatenation von Maskiertem Bild (3 Channel) und Maske (1 Channel)
-        # Ergebnis Shape: (4, 100, 100)
+        # Input: 4 Channels (RGB + Maske)
         input_tensor = torch.cat((masked_image_tensor, mask_tensor), dim=0)
         
         return input_tensor, target_tensor

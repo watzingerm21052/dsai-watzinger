@@ -1,5 +1,5 @@
 """
-    Author: Matthias Watzinger
+    Author: Dein Name
     HTL-Grieskirchen 5. Jahrgang, Schuljahr 2025/26
     architecture.py
 """
@@ -43,7 +43,6 @@ class Up(nn.Module):
     def __init__(self, in_channels, out_channels, bilinear=True):
         super().__init__()
 
-        # if bilinear, use the normal convolutions to reduce the number of channels
         if bilinear:
             self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
             self.conv = DoubleConv(in_channels, out_channels, in_channels // 2)
@@ -54,14 +53,12 @@ class Up(nn.Module):
     def forward(self, x1, x2):
         x1 = self.up(x1)
         
-        # Input is CHW. Handle edge cases where input size is not perfectly divisible by 2
         diffY = x2.size()[2] - x1.size()[2]
         diffX = x2.size()[3] - x1.size()[3]
 
         x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
                         diffY // 2, diffY - diffY // 2])
         
-        # Concatenate along channel axis
         x = torch.cat([x2, x1], dim=1)
         return self.conv(x)
 
@@ -80,21 +77,22 @@ class MyModel(nn.Module):
         self.n_classes = n_classes
         self.bilinear = bilinear
 
-        # Encoder (Downsampling path)
+        # Encoder
         self.inc = DoubleConv(n_in_channels, 64)
         self.down1 = Down(64, 128)
         self.down2 = Down(128, 256)
         self.down3 = Down(256, 512)
         factor = 2 if bilinear else 1
         self.down4 = Down(512, 1024 // factor)
+        
+        # Dropout im Bottleneck hilft bei so spärlichen Daten gegen Overfitting
+        self.dropout = nn.Dropout(0.5)
 
-        # Decoder (Upsampling path)
+        # Decoder
         self.up1 = Up(1024, 512 // factor, bilinear)
         self.up2 = Up(512, 256 // factor, bilinear)
         self.up3 = Up(256, 128 // factor, bilinear)
         self.up4 = Up(128, 64, bilinear)
-        
-        # Output layer
         self.outc = OutConv(64, n_classes)
 
     def forward(self, x):
@@ -104,11 +102,12 @@ class MyModel(nn.Module):
         x4 = self.down3(x3)
         x5 = self.down4(x4)
         
+        x5 = self.dropout(x5)
+        
         x = self.up1(x5, x4)
         x = self.up2(x, x3)
         x = self.up3(x, x2)
         x = self.up4(x, x1)
         logits = self.outc(x)
         
-        # Sigmoid activation to ensure pixel values are between 0 and 1
         return torch.sigmoid(logits)
