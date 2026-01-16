@@ -40,7 +40,7 @@ if __name__ == '__main__':
 
     train(**config_dict)
     
-    testset_path = os.path.join("data", "challenge_testset.npz")
+    testset_path = os.path.join("Image_Inpainting_Challenge", "code", "data", "challenge_testset.npz")
     state_dict_path = os.path.join(config_dict['results_path'], "best_model.pt")
     save_path = os.path.join(config_dict['results_path'], "testset", "my_submission_name.npz")
     plot_path = os.path.join(config_dict['results_path'], "testset", "plots")
