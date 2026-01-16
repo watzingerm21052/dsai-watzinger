@@ -111,7 +111,7 @@ def create_predictions(model_config, state_dict_path, testset_path, device, save
     with torch.no_grad():
         for i in range(len(input_arrays)):
             print(f"Processing image {i + 1}/{len(input_arrays)}")
-            input_array = torch.from_numpy(input_arrays[i]).to(
+            input_array = torch.from_numpy(input_arrays[i]).unsqueeze(0).to(
                 device)
             output = model(input_array)
             output = output.cpu().numpy()
