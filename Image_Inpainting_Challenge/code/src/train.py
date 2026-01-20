@@ -21,8 +21,11 @@ import wandb
 def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_stopping_patience, device, learningrate,
           weight_decay, n_updates, use_wandb, print_train_stats_at, print_stats_at, plot_at, validate_at, batchsize,
           network_config: dict):
+    
     np.random.seed(seed=seed)
     torch.manual_seed(seed=seed)
+    # Benchmark an für Speed
+    torch.backends.cudnn.benchmark = True
 
     if device is None:
         device = torch.device(
@@ -43,7 +46,6 @@ def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_st
             "early_stopping_patience": early_stopping_patience,
         })
 
-    # Prepare a path to plot to
     plotpath = os.path.join(results_path, "plots")
     os.makedirs(plotpath, exist_ok=True)
 
@@ -54,31 +56,32 @@ def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_st
     n_valid = int(n_total * validset_ratio)
     n_train = n_total - n_test - n_valid
     indices = np.random.permutation(n_total)
+    
     dataset_train = Subset(image_dataset, indices=indices[0:n_train])
     dataset_valid = Subset(image_dataset, indices=indices[n_train:n_train + n_valid])
     dataset_test = Subset(image_dataset, indices=indices[n_train + n_valid:n_total])
 
-    assert len(image_dataset) == len(dataset_train) + len(dataset_test) + len(dataset_valid)
-
-    del image_dataset
-
     dataloader_train = DataLoader(dataset=dataset_train, batch_size=batchsize,
-                                  num_workers=0, shuffle=True)
+                                  num_workers=2, shuffle=True, pin_memory=True)
     dataloader_valid = DataLoader(dataset=dataset_valid, batch_size=1,
                                   num_workers=0, shuffle=False)
     dataloader_test = DataLoader(dataset=dataset_test, batch_size=1,
                                  num_workers=0, shuffle=False)
 
-    # initializing the model
     network = MyModel(**network_config)
     network.to(device)
     network.train()
 
-    # defining the loss
     mse_loss = torch.nn.MSELoss()
-
-    # defining the optimizer
+    
+    # BACK TO BASICS: Adam statt AdamW, da dies bei dir besser lief.
     optimizer = torch.optim.Adam(network.parameters(), lr=learningrate, weight_decay=weight_decay)
+    
+    # Scheduler: ReduceLR ist oft einfacher zu handhaben als OneCycle
+    # verbose=True entfernt wegen Fehler
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5
+    )
 
     if use_wandb:
         wandb.watch(network, mse_loss, log="all", log_freq=10)
@@ -99,7 +102,7 @@ def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_st
             input, target = input.to(device), target.to(device)
 
             if (i + 1) % print_train_stats_at == 0:
-                print(f'Update Step {i + 1} of {n_updates}: Current loss: {loss_list[-1]}')
+                print(f'Update Step {i + 1} of {n_updates}: Current loss: {loss_list[-1] if loss_list else 0:.5f}')
 
             optimizer.zero_grad()
 
@@ -108,37 +111,36 @@ def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_st
             loss = mse_loss(output, target)
 
             loss.backward()
-
             optimizer.step()
 
             loss_list.append(loss.item())
 
-            # writing the stats to wandb
             if use_wandb and (i+1) % print_stats_at == 0:
                 wandb.log({"training/loss_per_batch": loss.item()}, step=i)
 
-            # plotting
             if (i + 1) % plot_at == 0:
                 print(f"Plotting images, current update {i + 1}")
                 plot(input.cpu().numpy(), target.detach().cpu().numpy(), output.detach().cpu().numpy(), plotpath, i)
 
-            # evaluating model every validate_at sample
             if (i + 1) % validate_at == 0:
                 print(f"Evaluation of the model:")
                 val_loss, val_rmse = evaluate_model(network, dataloader_valid, mse_loss, device)
-                print(f"val_loss: {val_loss}")
-                print(f"val_RMSE: {val_rmse}")
+                print(f"val_loss: {val_loss:.6f}, val_RMSE: {val_rmse:.4f}")
+                
+                # Scheduler Step
+                scheduler.step(val_loss)
+                
+                # Current LR ausgeben
+                current_lr = optimizer.param_groups[0]['lr']
+                print(f"Current LR: {current_lr}")
 
                 if use_wandb:
-                    wandb.log({"validation/loss": val_loss,
-                               "validation/RMSE": val_rmse}, step=i)
-                    # wandb histogram
+                    wandb.log({"validation/loss": val_loss, "validation/RMSE": val_rmse}, step=i)
 
-                # Save best model for early stopping
                 if val_loss < best_validation_loss:
                     best_validation_loss = val_loss
                     torch.save(network.state_dict(), saved_model_path)
-                    print(f"Saved new best model with val_loss: {best_validation_loss}")
+                    print(f"Saved new best model with val_loss: {best_validation_loss:.6f}")
                     counter = 0
                 else:
                     counter += 1
