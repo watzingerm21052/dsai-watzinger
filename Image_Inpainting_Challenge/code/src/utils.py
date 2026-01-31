@@ -72,6 +72,8 @@ def evaluate_model(network: torch.nn.Module, dataloader: torch.utils.data.DataLo
             target = target.to(device)
 
             outputs = network(input_array)
+            outputs = torch.nan_to_num(outputs, nan=0.0, posinf=1.0, neginf=0.0)
+            outputs = torch.clamp(outputs, 0.0, 1.0)
 
             # Combined Loss für Tracking
             total_loss += loss_fn(outputs, target).item()
@@ -95,9 +97,10 @@ def read_compressed_file(file_path: str):
     return input_arrays, known_arrays
 
 
-def create_predictions(model_config, state_dict_path, testset_path, device, save_path, plot_path, plot_at=20):
+def create_predictions(model_config, state_dict_path, testset_path, device, save_path, plot_path, plot_at=20, use_tta=True):
     """
     Here, one might needs to adjust the code based on the used preprocessing
+    Test-Time Augmentation (TTA) für bessere Predictions
     """
 
     if device is None:
@@ -125,14 +128,27 @@ def create_predictions(model_config, state_dict_path, testset_path, device, save
     with torch.no_grad():
         for i in range(len(input_arrays)):
             print(f"Processing image {i + 1}/{len(input_arrays)}")
-            input_array = torch.from_numpy(input_arrays[i]).unsqueeze(0).to(
-                device)
-            output = model(input_array)
+            input_array = torch.from_numpy(input_arrays[i]).unsqueeze(0).to(device)
+            
+            if use_tta:
+                # Test-Time Augmentation: Original + Horizontal Flip
+                output_original = model(input_array)
+                
+                # Horizontal Flip
+                input_flipped = torch.flip(input_array, dims=[3])
+                output_flipped = model(input_flipped)
+                output_flipped = torch.flip(output_flipped, dims=[3])
+                
+                # Durchschnitt der Vorhersagen
+                output = (output_original + output_flipped) / 2.0
+            else:
+                output = model(input_array)
+            
             output = output.cpu().numpy()
             predictions.append(output)
 
             if (i + 1) % plot_at == 0:
-                testset_plot(input_array.cpu().numpy(), output, plot_path, i)
+                testset_plot(input_arrays[i], output[0], plot_path, i)
 
     predictions = np.stack(predictions, axis=0)
 

@@ -16,16 +16,10 @@ IMAGE_DIMENSION = 100
 
 
 def get_augmentation_pipeline():
-    """State-of-the-Art Augmentation Pipeline"""
+    """Leichte Augmentation für bessere MSE-Konvergenz"""
     return T.Compose([
         T.RandomHorizontalFlip(p=0.5),
-        T.RandomVerticalFlip(p=0.3),
-        T.RandomRotation(degrees=20),
-        T.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
-        T.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.1, hue=0.05),
-        T.RandomGrayscale(p=0.1),
         T.ToTensor(),  # Konvertiert zu [0, 1] Tensor
-        T.RandomErasing(p=0.2, scale=(0.02, 0.1)),  # Random Patches löschen
     ])
 
 def create_arrays_from_image(image_tensor: torch.Tensor, offset: tuple, spacing: tuple) -> tuple[np.ndarray, np.ndarray]:

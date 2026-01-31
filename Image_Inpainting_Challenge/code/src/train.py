@@ -90,30 +90,15 @@ class SSIMLoss(nn.Module):
 
 
 class CombinedLoss(nn.Module):
-    """Multi-Scale Loss Function"""
+    """MSE-only Loss für direktes Optimieren der MSE-Metrik"""
     def __init__(self):
         super().__init__()
-        self.l1_loss = nn.L1Loss()
         self.mse_loss = nn.MSELoss()
-        self.perceptual_loss = PerceptualLoss()
-        self.ssim_loss = SSIMLoss()
     
     def forward(self, pred, target):
-        # L1 Loss (wichtig für Inpainting)
-        l1 = self.l1_loss(pred, target)
-        
-        # MSE Loss
+        # Direkt auf MSE optimieren
         mse = self.mse_loss(pred, target)
-        
-        # Perceptual Loss (VGG Features)
-        perceptual = self.perceptual_loss(pred, target)
-        
-        # SSIM Loss
-        ssim = self.ssim_loss(pred, target)
-        
-        # Kombinierte Loss: 40% L1 + 20% MSE + 25% Perceptual + 15% SSIM
-        total_loss = 0.4 * l1 + 0.2 * mse + 0.25 * perceptual + 0.15 * ssim
-        return total_loss
+        return mse
 
 import wandb
 
@@ -162,17 +147,10 @@ class SAM(torch.optim.Optimizer):
         )
         return norm
 
-    def step(self, closure=None):
-        assert closure is not None
-        closure(should_zero_grad=True)
-        self.first_step(zero_grad=True)
-        closure(should_zero_grad=True)
-        self.second_step()
-
 
 def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_stopping_patience, device, learningrate,
           weight_decay, n_updates, use_wandb, print_train_stats_at, print_stats_at, plot_at, validate_at, batchsize,
-          network_config: dict):
+          network_config: dict, gradient_clip_value=1.0, use_tta=False, accumulation_steps=1, warmup_steps=0):
     
     np.random.seed(seed=seed)
     torch.manual_seed(seed=seed)
@@ -237,23 +215,17 @@ def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_st
     )
     
     # EMA (Exponential Moving Average) für bessere Modelle
-    ema_model = ExponentialMovingAverage(network.parameters(), decay=0.9995)
+    ema_model = ExponentialMovingAverage(network.parameters(), decay=0.999)
     
     # Mixed Precision Training
     scaler = torch.amp.GradScaler('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # OneCycle LR Scheduler für bessere Konvergenz
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    # Cosine Annealing mit Warm Restarts für bessere Konvergenz
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer,
-        max_lr=learningrate,
-        total_steps=n_updates,
-        pct_start=0.1,  # 10% warmup
-        anneal_strategy='cos',
-        div_factor=25.0,
-        final_div_factor=1000.0
-    )
-    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.3, patience=3, min_lr=1e-7
+        T_0=10000,  # Restart alle 10k Updates
+        T_mult=2,   # Verdopple Periode nach jedem Restart
+        eta_min=1e-6  # Minimale LR
     )
 
     if use_wandb:
@@ -263,61 +235,91 @@ def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_st
     counter = 0
     best_validation_loss = np.inf
     loss_list = []
+    accumulation_counter = 0
+
+    # Speichere Basis LR für Warmup
+    base_lr = learningrate
+    warmup_factor = 1.0 if warmup_steps == 0 else 0.0
 
     saved_model_path = os.path.join(results_path, "best_model.pt")
 
     print(f"Started training on device {device}")
-    print(f"Using EfficientNet-B3 + Perceptual Loss + SSIM + Mixed Precision + EMA + OneCycleLR")
+    print(f"Using Gated Convolutions + Transformer Blocks + CBAM + Mixed Precision + EMA + Cosine Annealing")
     print(f"Model Parameters: {sum(p.numel() for p in network.parameters()):,}")
+
+    total_batches = len(dataloader_train)
 
     while i < n_updates:
 
-        for input, target in tqdm(dataloader_train, desc=f"Update {i}/{n_updates}"):
+        for batch_idx, (input, target) in enumerate(tqdm(dataloader_train, desc=f"Update {i}/{n_updates}")):
 
             input, target = input.to(device), target.to(device)
 
             if (i + 1) % print_train_stats_at == 0:
                 print(f'Update Step {i + 1} of {n_updates}: Current loss: {loss_list[-1] if loss_list else 0:.5f}')
 
-            # Mixed Precision Training
-            optimizer.zero_grad()
+            # Mixed Precision Training mit Gradient Accumulation
             device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
             with autocast(device_type=device_type):
                 output = network(input)
-                loss = loss_fn(output, target)
+                output = torch.nan_to_num(output, nan=0.0, posinf=1.0, neginf=0.0)
+                output = torch.clamp(output, 0.0, 1.0)
+                loss = loss_fn(output, target) / accumulation_steps
+
+            if not torch.isfinite(loss):
+                print("Non-finite loss detected. Skipping step.")
+                optimizer.zero_grad(set_to_none=True)
+                accumulation_counter = 0
+                scaler.update()
+                continue
 
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(network.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
+            accumulation_counter += 1
             
-            # Update EMA
-            ema_model.update()
-            
-            # OneCycle LR Scheduler Step
-            scheduler.step()
+            # Optimizer Step nach Accumulation
+            if accumulation_counter == accumulation_steps:
+                scaler.unscale_(optimizer)
+                
+                # Gradient Clipping
+                torch.nn.utils.clip_grad_norm_(network.parameters(), max_norm=gradient_clip_value)
+                
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+                
+                # Update EMA
+                ema_model.update()
+                
+                # Warmup Phase
+                if i < warmup_steps:
+                    warmup_factor = i / warmup_steps
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] = base_lr * warmup_factor
+                
+                # Cosine Annealing LR Scheduler Step
+                if i >= warmup_steps:
+                    scheduler.step(i - warmup_steps + (counter / len(dataloader_train)))
+                
+                accumulation_counter = 0
 
-            loss_list.append(loss.item())
+            loss_list.append((loss.item() * accumulation_steps))  # Speichere den tatsächlichen Loss
 
             if use_wandb and (i+1) % print_stats_at == 0:
                 wandb.log({"training/loss_per_batch": loss.item()}, step=i)
 
-            if (i + 1) % plot_at == 0:
+            if (i + 1) % validate_at == 0:
                 print(f"Plotting images, current update {i + 1}")
                 plot(input.cpu().numpy(), target.detach().cpu().numpy(), output.detach().cpu().numpy(), plotpath, i)
 
-            if (i + 1) % validate_at == 0:
+            # Validierung nur am Ende der Epoch (wenn Balken 100% ist)
+            if (batch_idx + 1) == total_batches:
                 print(f"Evaluation of the model:")
                 val_loss, val_rmse = evaluate_model(network, dataloader_valid, loss_fn, device)
                 print(f"val_loss: {val_loss:.6f}, val_RMSE: {val_rmse:.4f}")
                 
-                # Scheduler Step
-                plateau_scheduler.step(val_loss)
-                
                 # Current LR ausgeben
                 current_lr = optimizer.param_groups[0]['lr']
-                print(f"Current LR: {current_lr}")
+                print(f"Current LR: {current_lr:.2e}")
 
                 if use_wandb:
                     wandb.log({"validation/loss": val_loss, "validation/RMSE": val_rmse}, step=i)

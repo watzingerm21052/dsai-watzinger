@@ -22,32 +22,33 @@ if __name__ == '__main__':
     config_dict['seed'] = 42
     config_dict['testset_ratio'] = 0.1
     config_dict['validset_ratio'] = 0.1
-    config_dict['results_path'] = os.path.join(code_dir, "results_wabalabga")
+    config_dict['results_path'] = os.path.join(code_dir, "results_withNew")
     config_dict['data_path'] = os.path.join(code_dir, "data", "dataset")
     config_dict['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
-    config_dict['learningrate'] = 5e-4  # Stabiler gegen NaNs
-    config_dict['weight_decay'] = 1e-6  # Minimal
+    config_dict['learningrate'] = 5e-4  # Höher für besseren Start
+    config_dict['weight_decay'] = 5e-5  # Leichte Regularisierung
     config_dict['n_updates'] = 50000  # 80k Updates = hohe Qualität
     config_dict['batchsize'] = 12  # Kleinere Batches, aber Gradient Accumulation
-    config_dict['early_stopping_patience'] = 25  # Viel Geduld
+    config_dict['early_stopping_patience'] = 30  # Sehr viel Geduld
     config_dict['use_wandb'] = False
-    config_dict['gradient_clip_value'] = 0.3  # Strengeres Clipping gegen NaNs
+    config_dict['gradient_clip_value'] = 0.5  # Stärkeres Clipping für Stabilität
     config_dict['use_tta'] = True  # Test-Time Augmentation
     config_dict['accumulation_steps'] = 2  # Gradient Accumulation: effektiv Batchsize 24
-    config_dict['warmup_steps'] = 4000  # Stabilerer LR-Start
+    config_dict['warmup_steps'] = 2000  # 2k Schritte Warmup
 
     config_dict['print_train_stats_at'] = 10
     config_dict['print_stats_at'] = 50  # Öfter validieren
     config_dict['plot_at'] = 50
     config_dict['validate_at'] = 50
 
-
     network_config = {
         'n_in_channels': 4
     }
-    config_dict['network_config'] = network_config
     
+    config_dict['network_config'] = network_config
+
     train(**config_dict)
+    
     challenge_dir = os.path.dirname(code_dir)  # Image_Inpainting_Challenge Ordner
     testset_path = os.path.join(challenge_dir, "code", "data", "challenge_testset.npz")
     state_dict_path = os.path.join(config_dict['results_path'], "best_model.pt")
