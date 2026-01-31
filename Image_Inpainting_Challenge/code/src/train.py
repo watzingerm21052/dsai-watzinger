@@ -1,5 +1,5 @@
 """
-    Author: Your Name
+    Advanced Training mit Perceptual Loss, SSIM, EMA, Mixed Precision
     HTL-Grieskirchen 5. Jahrgang, Schuljahr 2025/26
     train.py
 """
@@ -9,13 +9,165 @@ from architecture import MyModel
 from utils import plot, evaluate_model
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.models as models
 import numpy as np
 import os
+from tqdm import tqdm
+from torch.amp import autocast, GradScaler
+from torch_ema import ExponentialMovingAverage
 
 from torch.utils.data import DataLoader
 from torch.utils.data import Subset
 
+
+class PerceptualLoss(nn.Module):
+    """Perceptual Loss basierend auf VGG16 Features"""
+    def __init__(self):
+        super().__init__()
+        vgg = models.vgg16(weights='DEFAULT').features[:16]  # Bis relu3_3
+        self.vgg = vgg.eval()
+        for param in self.vgg.parameters():
+            param.requires_grad = False
+        
+        # ImageNet Normalization
+        self.mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+        self.std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+    
+    def normalize(self, x):
+        return (x - self.mean.to(x.device)) / self.std.to(x.device)
+    
+    def forward(self, pred, target):
+        pred_norm = self.normalize(pred)
+        target_norm = self.normalize(target)
+        pred_features = self.vgg(pred_norm)
+        target_features = self.vgg(target_norm)
+        return F.mse_loss(pred_features, target_features)
+
+
+class SSIMLoss(nn.Module):
+    """SSIM Loss für bessere perceptuelle Qualität"""
+    def __init__(self, window_size=11):
+        super().__init__()
+        self.window_size = window_size
+        self.channel = 3
+        self.window = self.create_window(window_size, self.channel)
+    
+    def gaussian(self, window_size, sigma=1.5):
+        gauss = torch.Tensor([np.exp(-(x - window_size//2)**2/float(2*sigma**2)) for x in range(window_size)])
+        return gauss/gauss.sum()
+    
+    def create_window(self, window_size, channel):
+        _1D_window = self.gaussian(window_size).unsqueeze(1)
+        _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
+        window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
+        return window
+    
+    def ssim(self, img1, img2):
+        if self.window.device != img1.device:
+            self.window = self.window.to(img1.device)
+        
+        mu1 = F.conv2d(img1, self.window, padding=self.window_size//2, groups=self.channel)
+        mu2 = F.conv2d(img2, self.window, padding=self.window_size//2, groups=self.channel)
+        
+        mu1_sq = mu1.pow(2)
+        mu2_sq = mu2.pow(2)
+        mu1_mu2 = mu1 * mu2
+        
+        sigma1_sq = F.conv2d(img1*img1, self.window, padding=self.window_size//2, groups=self.channel) - mu1_sq
+        sigma2_sq = F.conv2d(img2*img2, self.window, padding=self.window_size//2, groups=self.channel) - mu2_sq
+        sigma12 = F.conv2d(img1*img2, self.window, padding=self.window_size//2, groups=self.channel) - mu1_mu2
+        
+        C1 = 0.01**2
+        C2 = 0.03**2
+        
+        ssim_map = ((2*mu1_mu2 + C1)*(2*sigma12 + C2))/((mu1_sq + mu2_sq + C1)*(sigma1_sq + sigma2_sq + C2))
+        return ssim_map.mean()
+    
+    def forward(self, pred, target):
+        return 1 - self.ssim(pred, target)
+
+
+class CombinedLoss(nn.Module):
+    """Multi-Scale Loss Function"""
+    def __init__(self):
+        super().__init__()
+        self.l1_loss = nn.L1Loss()
+        self.mse_loss = nn.MSELoss()
+        self.perceptual_loss = PerceptualLoss()
+        self.ssim_loss = SSIMLoss()
+    
+    def forward(self, pred, target):
+        # L1 Loss (wichtig für Inpainting)
+        l1 = self.l1_loss(pred, target)
+        
+        # MSE Loss
+        mse = self.mse_loss(pred, target)
+        
+        # Perceptual Loss (VGG Features)
+        perceptual = self.perceptual_loss(pred, target)
+        
+        # SSIM Loss
+        ssim = self.ssim_loss(pred, target)
+        
+        # Kombinierte Loss: 40% L1 + 20% MSE + 25% Perceptual + 15% SSIM
+        total_loss = 0.4 * l1 + 0.2 * mse + 0.25 * perceptual + 0.15 * ssim
+        return total_loss
+
 import wandb
+
+
+class SAM(torch.optim.Optimizer):
+    """Sharpness Aware Minimization"""
+    def __init__(self, params, base_optimizer, rho=0.05, **kwargs):
+        assert isinstance(base_optimizer, type)
+        self.base_optimizer = base_optimizer
+        self.rho = rho
+        super(SAM, self).__init__(params, dict(rho=rho, **kwargs))
+
+    @torch.no_grad()
+    def first_step(self, zero_grad=False):
+        grad_norm = self._grad_norm()
+        for group in self.param_groups:
+            scale = self.rho / (grad_norm + 1e-12)
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                self.state[p]["e_w"] = p.grad * scale
+                p.add_(self.state[p]["e_w"])
+        if zero_grad:
+            self.zero_grad()
+
+    @torch.no_grad()
+    def second_step(self, zero_grad=False):
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                p.sub_(self.state[p]["e_w"])
+        self.base_optimizer.step()
+        if zero_grad:
+            self.zero_grad()
+
+    @torch.no_grad()
+    def _grad_norm(self):
+        norm = torch.norm(
+            torch.stack([
+                ((p.grad ** 2).sum()).sqrt()
+                for group in self.param_groups
+                for p in group["params"]
+                if p.grad is not None
+            ])
+        )
+        return norm
+
+    def step(self, closure=None):
+        assert closure is not None
+        closure(should_zero_grad=True)
+        self.first_step(zero_grad=True)
+        closure(should_zero_grad=True)
+        self.second_step()
 
 
 def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_stopping_patience, device, learningrate,
@@ -62,7 +214,7 @@ def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_st
     dataset_test = Subset(image_dataset, indices=indices[n_train + n_valid:n_total])
 
     dataloader_train = DataLoader(dataset=dataset_train, batch_size=batchsize,
-                                  num_workers=2, shuffle=True, pin_memory=True)
+                                  num_workers=0, shuffle=True, pin_memory=True)
     dataloader_valid = DataLoader(dataset=dataset_valid, batch_size=1,
                                   num_workers=0, shuffle=False)
     dataloader_test = DataLoader(dataset=dataset_test, batch_size=1,
@@ -72,19 +224,40 @@ def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_st
     network.to(device)
     network.train()
 
-    mse_loss = torch.nn.MSELoss()
+    # Multi-Scale Loss Function (L1 + MSE + Perceptual + SSIM)
+    loss_fn = CombinedLoss()
+    loss_fn.to(device)
     
-    # BACK TO BASICS: Adam statt AdamW, da dies bei dir besser lief.
-    optimizer = torch.optim.Adam(network.parameters(), lr=learningrate, weight_decay=weight_decay)
+    # Optimizer (AdamW for better weight decay)
+    optimizer = torch.optim.AdamW(
+        network.parameters(), 
+        lr=learningrate, 
+        weight_decay=weight_decay,
+        betas=(0.9, 0.999)
+    )
     
-    # Scheduler: ReduceLR ist oft einfacher zu handhaben als OneCycle
-    # verbose=True entfernt wegen Fehler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5
+    # EMA (Exponential Moving Average) für bessere Modelle
+    ema_model = ExponentialMovingAverage(network.parameters(), decay=0.9995)
+    
+    # Mixed Precision Training
+    scaler = torch.amp.GradScaler('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # OneCycle LR Scheduler für bessere Konvergenz
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=learningrate,
+        total_steps=n_updates,
+        pct_start=0.1,  # 10% warmup
+        anneal_strategy='cos',
+        div_factor=25.0,
+        final_div_factor=1000.0
+    )
+    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.3, patience=3, min_lr=1e-7
     )
 
     if use_wandb:
-        wandb.watch(network, mse_loss, log="all", log_freq=10)
+        wandb.watch(network, loss_fn, log="all", log_freq=10)
 
     i = 0
     counter = 0
@@ -94,24 +267,36 @@ def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_st
     saved_model_path = os.path.join(results_path, "best_model.pt")
 
     print(f"Started training on device {device}")
+    print(f"Using EfficientNet-B3 + Perceptual Loss + SSIM + Mixed Precision + EMA + OneCycleLR")
+    print(f"Model Parameters: {sum(p.numel() for p in network.parameters()):,}")
 
     while i < n_updates:
 
-        for input, target in dataloader_train:
+        for input, target in tqdm(dataloader_train, desc=f"Update {i}/{n_updates}"):
 
             input, target = input.to(device), target.to(device)
 
             if (i + 1) % print_train_stats_at == 0:
                 print(f'Update Step {i + 1} of {n_updates}: Current loss: {loss_list[-1] if loss_list else 0:.5f}')
 
+            # Mixed Precision Training
             optimizer.zero_grad()
+            device_type = 'cuda' if torch.cuda.is_available() else 'cpu'
+            with autocast(device_type=device_type):
+                output = network(input)
+                loss = loss_fn(output, target)
 
-            output = network(input)
-
-            loss = mse_loss(output, target)
-
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(network.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            
+            # Update EMA
+            ema_model.update()
+            
+            # OneCycle LR Scheduler Step
+            scheduler.step()
 
             loss_list.append(loss.item())
 
@@ -124,11 +309,11 @@ def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_st
 
             if (i + 1) % validate_at == 0:
                 print(f"Evaluation of the model:")
-                val_loss, val_rmse = evaluate_model(network, dataloader_valid, mse_loss, device)
+                val_loss, val_rmse = evaluate_model(network, dataloader_valid, loss_fn, device)
                 print(f"val_loss: {val_loss:.6f}, val_RMSE: {val_rmse:.4f}")
                 
                 # Scheduler Step
-                scheduler.step(val_loss)
+                plateau_scheduler.step(val_loss)
                 
                 # Current LR ausgeben
                 current_lr = optimizer.param_groups[0]['lr']
@@ -139,7 +324,11 @@ def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_st
 
                 if val_loss < best_validation_loss:
                     best_validation_loss = val_loss
+                    # Speichere EMA Model
+                    ema_model.store(network.parameters())
+                    ema_model.copy_to(network.parameters())
                     torch.save(network.state_dict(), saved_model_path)
+                    ema_model.restore(network.parameters())
                     print(f"Saved new best model with val_loss: {best_validation_loss:.6f}")
                     counter = 0
                 else:
@@ -157,7 +346,7 @@ def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_st
 
     print("Evaluating the self-defined testset")
     network.load_state_dict(torch.load(saved_model_path))
-    testset_loss, testset_rmse = evaluate_model(network=network, dataloader=dataloader_test, loss_fn=mse_loss,
+    testset_loss, testset_rmse = evaluate_model(network=network, dataloader=dataloader_test, loss_fn=loss_fn,
                                                 device=device)
 
     print(f'testset_loss of model: {testset_loss}, RMSE = {testset_rmse}')

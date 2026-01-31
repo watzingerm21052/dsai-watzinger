@@ -1,5 +1,5 @@
 """
-    Author: Dein Name
+    Datasets mit Advanced Augmentation
     HTL-Grieskirchen 5. Jahrgang, Schuljahr 2025/26
     datasets.py
 """
@@ -9,34 +9,24 @@ import numpy as np
 import os
 import glob
 from PIL import Image
-import torchvision.transforms.functional as TF
+import torchvision.transforms as T
 import random
 
 IMAGE_DIMENSION = 100
 
-def resize(img: Image.Image) -> Image.Image:
-    """Resized das Bild auf die Zielgröße (100x100)."""
-    return img.resize((IMAGE_DIMENSION, IMAGE_DIMENSION), Image.BILINEAR)
 
-def preprocess(img: Image.Image) -> torch.Tensor:
-    """
-    Konvertiert das PIL Image in einen Tensor und normalisiert auf [0, 1].
-    Inkludiert stärkere, aber gitter-konforme Augmentations.
-    """
-    # 1. Random 90-Degree Rotations
-    # Das ist sicher, da 90° Rotationen das Pixel-Grid nicht verzerren.
-    rotations = [0, 90, 180, 270]
-    angle = random.choice(rotations)
-    if angle > 0:
-        img = TF.rotate(img, angle)
-
-    # 2. Random Flips
-    if random.random() > 0.5:
-        img = TF.hflip(img)
-    if random.random() > 0.5:
-        img = TF.vflip(img)
-        
-    return TF.to_tensor(img)
+def get_augmentation_pipeline():
+    """State-of-the-Art Augmentation Pipeline"""
+    return T.Compose([
+        T.RandomHorizontalFlip(p=0.5),
+        T.RandomVerticalFlip(p=0.3),
+        T.RandomRotation(degrees=20),
+        T.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+        T.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.1, hue=0.05),
+        T.RandomGrayscale(p=0.1),
+        T.ToTensor(),  # Konvertiert zu [0, 1] Tensor
+        T.RandomErasing(p=0.2, scale=(0.02, 0.1)),  # Random Patches löschen
+    ])
 
 def create_arrays_from_image(image_tensor: torch.Tensor, offset: tuple, spacing: tuple) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -66,14 +56,17 @@ class ImageDataset(torch.utils.data.Dataset):
         super().__init__()
         self.datafolder = datafolder
         
-        # Rekursive Suche nach JPGs
-        search_pattern = os.path.join(datafolder, "**", "*.jpg")
-        self.imagefiles = sorted(glob.glob(search_pattern, recursive=True))
+        # Suche DIREKT im Ordner (nicht rekursiv in Unterordnern)
+        search_pattern = os.path.join(datafolder, "*.jpg")
+        self.imagefiles = sorted(glob.glob(search_pattern))
         
-        # Fallback
         if len(self.imagefiles) == 0:
-             search_pattern_png = os.path.join(datafolder, "**", "*.png")
-             self.imagefiles = sorted(glob.glob(search_pattern_png, recursive=True))
+             search_pattern_png = os.path.join(datafolder, "*.png")
+             self.imagefiles = sorted(glob.glob(search_pattern_png))
+        
+        print(f"Found {len(self.imagefiles)} images in {datafolder}")
+        
+        self.augmentation = get_augmentation_pipeline()
 
     def __len__(self):
         return len(self.imagefiles)
@@ -82,19 +75,17 @@ class ImageDataset(torch.utils.data.Dataset):
         img_path = self.imagefiles[idx]
         
         try:
-            image = Image.open(img_path).convert("RGB")
+            image_pil = Image.open(img_path).convert("RGB")
+            image_pil = image_pil.resize((IMAGE_DIMENSION, IMAGE_DIMENSION), Image.BILINEAR)
             
-            # 1. Resize
-            image = resize(image)
-            
-            # 2. Preprocess (Augment + ToTensor)
-            target_tensor = preprocess(image)
+            # Augmentations - torchvision transforms erwarten PIL Image und geben Tensor zurück
+            target_tensor = self.augmentation(image_pil)
             
         except Exception as e:
-            # Bei Fehler das nächste Bild nehmen
+            print(f"Error loading image {img_path}: {e}")
             return self.__getitem__((idx + 1) % len(self))
         
-        # Zufälliges Gitter laut Angabe
+        # Zufälliges Gitter
         offset = (random.randint(0, 8), random.randint(0, 8))
         spacing = (random.randint(2, 6), random.randint(2, 6))
         

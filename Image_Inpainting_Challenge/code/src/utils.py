@@ -17,6 +17,11 @@ def plot(inputs, targets, predictions, path, update):
 
     os.makedirs(path, exist_ok=True)
     fig, axes = plt.subplots(ncols=3, figsize=(15, 5))
+    
+    # Convert to float32 for matplotlib compatibility (mixed precision uses float16)
+    inputs = inputs.astype(np.float32)
+    targets = targets.astype(np.float32)
+    predictions = predictions.astype(np.float32)
 
     for i in range(len(inputs)):
         for ax, data, title in zip(axes, [inputs, targets, predictions], ["Input", "Target", "Prediction"]):
@@ -54,9 +59,12 @@ def testset_plot(input_array, output_array, path, index):
 
 
 def evaluate_model(network: torch.nn.Module, dataloader: torch.utils.data.DataLoader, loss_fn, device: torch.device):
-    """Returnse MSE and RMSE of the model on the provided dataloader"""
+    """Returns Combined Loss and RMSE of the model on the provided dataloader"""
     network.eval()
-    loss = 0.0
+    total_loss = 0.0
+    total_mse = 0.0
+    mse_fn = torch.nn.MSELoss()
+    
     with torch.no_grad():
         for data in dataloader:
             input_array, target = data
@@ -65,13 +73,19 @@ def evaluate_model(network: torch.nn.Module, dataloader: torch.utils.data.DataLo
 
             outputs = network(input_array)
 
-            loss += loss_fn(outputs, target).item()
+            # Combined Loss für Tracking
+            total_loss += loss_fn(outputs, target).item()
+            
+            # Echtes MSE für RMSE-Berechnung
+            total_mse += mse_fn(outputs, target).item()
 
-        loss = loss / len(dataloader)
+        avg_loss = total_loss / len(dataloader)
+        avg_mse = total_mse / len(dataloader)
+        rmse = 255.0 * np.sqrt(avg_mse)
 
         network.train()
 
-        return loss, 255.0 * np.sqrt(loss)
+        return avg_loss, rmse
 
 
 def read_compressed_file(file_path: str):
