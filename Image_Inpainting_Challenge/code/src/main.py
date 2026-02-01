@@ -22,14 +22,14 @@ if __name__ == '__main__':
     config_dict['seed'] = 42
     config_dict['testset_ratio'] = 0.1
     config_dict['validset_ratio'] = 0.1
-    config_dict['results_path'] = os.path.join(code_dir, "results_wabalabga")
+    config_dict['results_path'] = os.path.join(code_dir, "results_nirwana")
     config_dict['data_path'] = os.path.join(code_dir, "data", "dataset")
     config_dict['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
     config_dict['learningrate'] = 5e-4  # Stabiler gegen NaNs
     config_dict['weight_decay'] = 1e-6  # Minimal
-    config_dict['n_updates'] = 50000  # 80k Updates = hohe Qualität
-    config_dict['batchsize'] = 12  # Kleinere Batches, aber Gradient Accumulation
-    config_dict['early_stopping_patience'] = 25  # Viel Geduld
+    config_dict['n_updates'] = 80000  # Stabilere Trainingslänge
+    config_dict['batchsize'] = 12  # Stabiler für diese GPU
+    config_dict['early_stopping_patience'] = 30  # Nach 30 schlechten Validierungen stoppen
     config_dict['use_wandb'] = False
     config_dict['gradient_clip_value'] = 0.3  # Strengeres Clipping gegen NaNs
     config_dict['use_tta'] = True  # Test-Time Augmentation

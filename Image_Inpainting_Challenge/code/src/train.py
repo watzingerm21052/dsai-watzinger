@@ -206,7 +206,7 @@ def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_st
     loss_fn = CombinedLoss()
     loss_fn.to(device)
     
-    # Optimizer (AdamW for better weight decay)
+    # Optimizer (AdamW mit aggressiven Settings)
     optimizer = torch.optim.AdamW(
         network.parameters(), 
         lr=learningrate, 
