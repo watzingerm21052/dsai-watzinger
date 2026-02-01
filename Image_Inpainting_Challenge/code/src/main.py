@@ -25,16 +25,16 @@ if __name__ == '__main__':
     config_dict['results_path'] = os.path.join(code_dir, "results_nirwana")
     config_dict['data_path'] = os.path.join(code_dir, "data", "dataset")
     config_dict['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
-    config_dict['learningrate'] = 5e-4  # Stabiler gegen NaNs
-    config_dict['weight_decay'] = 1e-6  # Minimal
-    config_dict['n_updates'] = 80000  # Stabilere Trainingslänge
+    config_dict['learningrate'] = 3e-4  # Niedriger für Feintuning
+    config_dict['weight_decay'] = 5e-7  # Minimal
+    config_dict['n_updates'] = 80000  # Maximal 80k Updates
     config_dict['batchsize'] = 12  # Stabiler für diese GPU
-    config_dict['early_stopping_patience'] = 30  # Nach 30 schlechten Validierungen stoppen
+    config_dict['early_stopping_patience'] = 10  # Stoppe nach 10x gleichem val_loss
     config_dict['use_wandb'] = False
-    config_dict['gradient_clip_value'] = 0.3  # Strengeres Clipping gegen NaNs
+    config_dict['gradient_clip_value'] = 0.2  # Strengeres Clipping
     config_dict['use_tta'] = True  # Test-Time Augmentation
     config_dict['accumulation_steps'] = 2  # Gradient Accumulation: effektiv Batchsize 24
-    config_dict['warmup_steps'] = 4000  # Stabilerer LR-Start
+    config_dict['warmup_steps'] = 6000  # Längerer Warmup
 
     config_dict['print_train_stats_at'] = 10
     config_dict['print_stats_at'] = 50  # Öfter validieren
