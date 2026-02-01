@@ -22,14 +22,14 @@ if __name__ == '__main__':
     config_dict['seed'] = 42
     config_dict['testset_ratio'] = 0.1
     config_dict['validset_ratio'] = 0.1
-    config_dict['results_path'] = os.path.join(code_dir, "results_nirwana")
+    config_dict['results_path'] = os.path.join(code_dir, "results_saektis")
     config_dict['data_path'] = os.path.join(code_dir, "data", "dataset")
     config_dict['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
     config_dict['learningrate'] = 3e-4  # Niedriger für Feintuning
     config_dict['weight_decay'] = 5e-7  # Minimal
-    config_dict['n_updates'] = 80000  # Maximal 80k Updates
+    config_dict['n_updates'] = 150000  # Maximal 80k Updates
     config_dict['batchsize'] = 12  # Stabiler für diese GPU
-    config_dict['early_stopping_patience'] = 10  # Stoppe nach 10x gleichem val_loss
+    config_dict['early_stopping_patience'] = 5  # Stoppe nach 10x gleichem val_loss
     config_dict['use_wandb'] = False
     config_dict['gradient_clip_value'] = 0.2  # Strengeres Clipping
     config_dict['use_tta'] = True  # Test-Time Augmentation
