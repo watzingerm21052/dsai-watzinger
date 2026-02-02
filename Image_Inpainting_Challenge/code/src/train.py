@@ -150,7 +150,7 @@ class SAM(torch.optim.Optimizer):
 
 def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_stopping_patience, device, learningrate,
           weight_decay, n_updates, use_wandb, print_train_stats_at, print_stats_at, plot_at, validate_at, batchsize,
-          network_config: dict, gradient_clip_value=1.0, use_tta=False, accumulation_steps=1, warmup_steps=0):
+          network_config: dict, gradient_clip_value=1.0, use_tta=False, accumulation_steps=1, warmup_steps=0, resume_from=None):
     
     np.random.seed(seed=seed)
     torch.manual_seed(seed=seed)
@@ -201,6 +201,13 @@ def train(seed, testset_ratio, validset_ratio, data_path, results_path, early_st
     network = MyModel(**network_config)
     network.to(device)
     network.train()
+    
+    # Resume from checkpoint if specified
+    if resume_from is not None and os.path.exists(resume_from):
+        print(f"Loading model from checkpoint: {resume_from}")
+        network.load_state_dict(torch.load(resume_from, map_location=device))
+        print("Model loaded successfully!")
+
 
     # Multi-Scale Loss Function (L1 + MSE + Perceptual + SSIM)
     loss_fn = CombinedLoss()

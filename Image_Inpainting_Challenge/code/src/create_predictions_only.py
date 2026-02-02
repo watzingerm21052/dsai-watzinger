@@ -4,6 +4,8 @@ Kann jederzeit nach Training-Abbruch ausgeführt werden
 """
 
 import os
+import torch
+from architecture import MyModel
 from utils import create_predictions
 
 if __name__ == '__main__':
@@ -21,6 +23,20 @@ if __name__ == '__main__':
     state_dict_path = os.path.join(results_path, "best_model.pt")
     save_path = os.path.join(results_path, "testset", "my_submission_name.npz")
     plot_path = os.path.join(results_path, "testset", "plots")
+
+    # Prüfe ob Modell existiert
+    if os.path.exists(state_dict_path):
+        print("=" * 50)
+        print("✅ BEST MODEL LOADED")
+        print("=" * 50)
+        print(f"Model path: {state_dict_path}")
+        print(f"File size:  {os.path.getsize(state_dict_path) / 1e6:.1f} MB")
+        print()
+        print("⚠️ Check your training output for:")
+        print("   - Validation RMSE (val_RMSE)")
+        print("   - Best epoch")
+        print("=" * 50)
+        print()
 
     print(f"Loading model from: {state_dict_path}")
     create_predictions(network_config, state_dict_path, testset_path, None, save_path, plot_path, 
