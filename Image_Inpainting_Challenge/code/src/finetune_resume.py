@@ -22,7 +22,7 @@ if __name__ == '__main__':
     config_dict['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # Feintuning-Settings
-    config_dict['learningrate'] = 2e-4
+    config_dict['learningrate'] = 1e-5
     config_dict['weight_decay'] = 5e-7
     config_dict['n_updates'] = 30000
     config_dict['batchsize'] = 12
