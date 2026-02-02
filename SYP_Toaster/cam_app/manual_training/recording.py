@@ -6,7 +6,7 @@ import numpy as np
 from pathlib import Path
 
 # ================= PFADE =================
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
 
 # Output-Ordner

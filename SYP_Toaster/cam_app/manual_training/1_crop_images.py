@@ -13,8 +13,8 @@ import numpy as np
 from pathlib import Path
 
 # ================= PFADE =================
-# Basis-Ordner (relativ zum Skript)
-BASE_DIR = Path(__file__).parent
+# Basis-Ordner (cam_app)
+BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
 
 # Input/Output Ordner

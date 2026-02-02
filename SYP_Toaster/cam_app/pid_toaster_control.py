@@ -57,6 +57,10 @@ class Config:
     
     # Kamera
     CAMERA_ID = 0
+    CAMERA_IDS = [1, 0, 2]  # Bevorzugte Reihenfolge
+    CAMERA_WIDTH = 1280
+    CAMERA_HEIGHT = 720
+    DISABLE_AUTOFOCUS = True
     IMAGE_SIZE = (224, 224)
     
     # Toast-Klassen
@@ -66,6 +70,25 @@ class Config:
         self.RESULTS_DIR.mkdir(exist_ok=True)
         self.AUTO_DATA_DIR.mkdir(exist_ok=True)
         self.MODEL_DIR.mkdir(exist_ok=True)
+
+
+def open_camera(preferred_ids, width=None, height=None, disable_autofocus=False, use_dshow=True):
+    """Öffnet automatisch die erste verfügbare Kamera aus der Liste."""
+    for cam_id in preferred_ids:
+        cap = cv2.VideoCapture(cam_id, cv2.CAP_DSHOW) if use_dshow else cv2.VideoCapture(cam_id)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if ret:
+                if width is not None:
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                if height is not None:
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+                if disable_autofocus:
+                    cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+                print(f"✅ Kamera {cam_id} gefunden und verbunden.")
+                return cap
+        cap.release()
+    return None
 
 
 # ==================== PID REGLER ====================
@@ -194,6 +217,7 @@ class AutoDataCollector:
         self.config = config
         self.data_file = config.AUTO_DATA_DIR / "training_data.pkl"
         self.samples = []  # Liste von (gray_image_array, label, timestamp)
+        self.label_time_thresholds = None
         self.load_existing_data()
     
     def load_existing_data(self):
@@ -224,6 +248,69 @@ class AutoDataCollector:
                 print(f"  ❌ Fehler beim Laden von {pkl_file.name}: {e}")
         
         print(f"✅ Gesamt: {len(self.samples)} Samples geladen")
+        # Normalisiere Format und berechne Zeit-Schwellen
+        self._update_sample_format()
+        self._compute_label_time_thresholds()
+
+    def _compute_label_time_thresholds(self):
+        """
+        Berechnet dynamische Zeit-Schwellen aus vorhandenen gelabelten Daten.
+        Nutzt Median-Zeit je Klasse und setzt Schwellen zwischen den Klassen.
+        Fallback auf AUTO_LABEL_INTERVALS wenn zu wenige Daten vorhanden sind.
+        """
+        num_classes = len(self.config.CLASSES)
+        times_by_label = {i: [] for i in range(num_classes)}
+
+        for sample in self.samples:
+            if len(sample) != 3:
+                continue
+            _, label, elapsed = sample
+            if isinstance(label, (int, np.integer)) and 0 <= label < num_classes:
+                times_by_label[label].append(float(elapsed))
+
+        # Prüfe, ob wir genug Daten haben (mindestens 2 Klassen mit Werten)
+        available_labels = [i for i in range(num_classes) if len(times_by_label[i]) > 0]
+        if len(available_labels) < 2:
+            self.label_time_thresholds = None
+            return
+
+        # Median-Zeit pro Klasse
+        medians = []
+        for i in range(num_classes):
+            if times_by_label[i]:
+                medians.append(np.median(times_by_label[i]))
+            else:
+                medians.append(None)
+
+        # Fehlende Medians linear interpolieren zwischen vorhandenen
+        last_idx = None
+        for i in range(num_classes):
+            if medians[i] is not None:
+                if last_idx is None:
+                    # Backfill nach links
+                    for j in range(0, i):
+                        medians[j] = medians[i]
+                else:
+                    # Interpolieren zwischen last_idx und i
+                    start = medians[last_idx]
+                    end = medians[i]
+                    span = i - last_idx
+                    for j in range(1, span):
+                        medians[last_idx + j] = start + (end - start) * (j / span)
+                last_idx = i
+
+        # Falls am Ende None übrig bleibt, forward fill
+        if last_idx is not None:
+            for j in range(last_idx + 1, num_classes):
+                medians[j] = medians[last_idx]
+
+        # Schwellen zwischen Klassen definieren
+        thresholds = [0.0]
+        for i in range(num_classes - 1):
+            thresholds.append((medians[i] + medians[i + 1]) / 2.0)
+        thresholds.append(float('inf'))
+
+        self.label_time_thresholds = thresholds
     
     def save_data(self):
         """Speichert Trainingsdaten in separate Datei mit Timestamp"""
@@ -240,12 +327,15 @@ class AutoDataCollector:
     def auto_label_from_time(self, elapsed_time):
         """
         Automatisches Labeling basierend auf verstrichener Zeit
-        0-30s = 0 (roh)
-        30-60s = 1 (leicht)
-        60-90s = 2 (perfekt)
-        90-120s = 3 (dunkel)
-        >120s = 4 (verbrannt)
+        Dynamisch aus vorhandenen .pkl berechnet (falls vorhanden).
+        Fallback: AUTO_LABEL_INTERVALS.
         """
+        if self.label_time_thresholds:
+            for i in range(len(self.label_time_thresholds) - 1):
+                if self.label_time_thresholds[i] <= elapsed_time < self.label_time_thresholds[i + 1]:
+                    return i
+            return len(self.label_time_thresholds) - 2
+
         intervals = self.config.AUTO_LABEL_INTERVALS
         for i in range(len(intervals) - 1):
             if intervals[i] <= elapsed_time < intervals[i + 1]:
@@ -291,8 +381,14 @@ class AutoDataCollector:
         print("💡 Labels werden automatisch basierend auf Zeit vergeben")
         print("\nDrücke 'q' zum vorzeitigen Abbruch\n")
         
-        cap = cv2.VideoCapture(self.config.CAMERA_ID)
-        if not cap.isOpened():
+        cap = open_camera(
+            self.config.CAMERA_IDS,
+            width=self.config.CAMERA_WIDTH,
+            height=self.config.CAMERA_HEIGHT,
+            disable_autofocus=self.config.DISABLE_AUTOFOCUS,
+            use_dshow=True
+        )
+        if not cap:
             print("❌ Kamera konnte nicht geöffnet werden!")
             return 0
         
@@ -314,34 +410,36 @@ class AutoDataCollector:
                 # Auto-Label basierend auf Zeit
                 label = self.auto_label_from_time(elapsed)
                 
-                # Resize und speichern
+                # Resize zu Grayscale und speichern
                 resized = cv2.resize(frame, self.config.IMAGE_SIZE)
-                self.samples.append((resized, label, elapsed))
+                resized_gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+                self.samples.append((resized_gray, label, elapsed))
                 
                 samples_collected += 1
                 last_capture = elapsed
             
-            # Visualisierung
-            display_frame = frame.copy()
+            # Visualisierung - NUR GRAYSCALE!
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray_display = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2BGR)
             current_label = self.auto_label_from_time(elapsed)
             
-            cv2.putText(display_frame, f"Zeit: {elapsed:.1f}s / {duration}s",
+            cv2.putText(gray_display, f"Zeit: {elapsed:.1f}s / {duration}s",
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(display_frame, f"Aktuelles Label: {self.config.CLASSES[current_label]}",
+            cv2.putText(gray_display, f"Aktuelles Label: {self.config.CLASSES[current_label]}",
                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-            cv2.putText(display_frame, f"Samples: {samples_collected}",
+            cv2.putText(gray_display, f"Samples: {samples_collected}",
                        (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
             
             # Fortschrittsbalken
             progress = min(elapsed / duration, 1.0)
-            bar_width = int(progress * (display_frame.shape[1] - 20))
-            cv2.rectangle(display_frame, (10, display_frame.shape[0] - 30),
-                         (10 + bar_width, display_frame.shape[0] - 10),
+            bar_width = int(progress * (gray_display.shape[1] - 20))
+            cv2.rectangle(gray_display, (10, gray_display.shape[0] - 30),
+                         (10 + bar_width, gray_display.shape[0] - 10),
                          (0, 255, 0), -1)
             
             if gui_available:
                 try:
-                    cv2.imshow('Automatische Daten-Aufnahme', display_frame)
+                    cv2.imshow('Automatische Daten-Aufnahme - S/W', gray_display)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
                 except cv2.error:
@@ -635,9 +733,15 @@ class LiveToasterController:
         print(f"PID-Parameter: Kp={self.config.PID_KP}, Ki={self.config.PID_KI}, Kd={self.config.PID_KD}")
         print("Drücke 'q' zum Beenden\n")
         
-        cap = cv2.VideoCapture(self.config.CAMERA_ID)
+        cap = open_camera(
+            self.config.CAMERA_IDS,
+            width=self.config.CAMERA_WIDTH,
+            height=self.config.CAMERA_HEIGHT,
+            disable_autofocus=self.config.DISABLE_AUTOFOCUS,
+            use_dshow=True
+        )
         
-        if not cap.isOpened():
+        if not cap:
             print("❌ Kamera konnte nicht geöffnet werden!")
             return
         
@@ -676,8 +780,9 @@ class LiveToasterController:
                     'pid_output': pid_output
                 })
             
-            # Visualisierung
-            display_frame = frame.copy()
+            # Visualisierung - NUR GRAYSCALE!
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            display_frame = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2BGR)
             
             # Info-Text
             y_pos = 30
@@ -711,7 +816,7 @@ class LiveToasterController:
             
             if gui_available:
                 try:
-                    cv2.imshow('PID Toaster Control', display_frame)
+                    cv2.imshow('PID Toaster Control - S/W', display_frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
                 except cv2.error:

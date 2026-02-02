@@ -65,7 +65,9 @@ def manual_data_collection():
     samples = []
     current_label = 0 # Startet standardmäßig mit "Roh"
     recording = False
-    start_time = 0
+    recording_start_time = None
+    paused_at = None
+    total_pause = 0.0
     last_save = 0
     
     # Alte Daten laden (damit man mehrere Toasts nacheinander aufnehmen kann)
@@ -82,8 +84,11 @@ def manual_data_collection():
         ret, frame = cap.read()
         if not ret: break
 
-        # Vorschau-Bild kopieren (damit Text nicht im Trainingsbild landet)
-        display = frame.copy()
+        # Nur Grayscale verwenden!
+        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        display = gray_frame.copy()
+        # Konvertiere zurück zu 3-Kanal für Text-Anzeige
+        display = cv2.cvtColor(display, cv2.COLOR_GRAY2BGR)
         
         # --- AUFNAHME LOGIK ---
         if recording:
@@ -91,12 +96,12 @@ def manual_data_collection():
             # Wir speichern 2 Bilder pro Sekunde (alle 0.5s)
             if now - last_save > 0.5: 
                 # WICHTIG: Nur Grayscale speichern (robuster gegen Belichtung!)
-                small_frame = cv2.resize(frame, IMAGE_SIZE)
-                small_frame_gray = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
-                elapsed = now - start_time
+                small_frame = cv2.resize(gray_frame, IMAGE_SIZE)
+                # Kontinuierlicher Zeitstempel seit Start (Pausen abgezogen)
+                elapsed = now - recording_start_time - total_pause
                 
                 # Format: (Grayscale, Label, Timestamp)
-                samples.append((small_frame_gray, current_label, elapsed))
+                samples.append((small_frame, current_label, elapsed))
                 
                 last_save = now
                 print(f"📸 Gelernt: {CLASSES[current_label]} (S/W) (Total: {len(samples)})")
@@ -121,25 +126,7 @@ def manual_data_collection():
         info_text = f"Samples: {len(samples)} | [0]=Roh [1]=Leicht [2]=Perfekt [3]=Dunkel [4]=Verbrannt"
         cv2.putText(display, info_text, (20, h-60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
-        # Grayscale Version für parallele Anzeige
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray_display = cv2.cvtColor(gray_frame, cv2.COLOR_GRAY2BGR)  # Zurück zu 3 Kanälen für Kompatibilität
-        
-        # Schwarzer Balken für S/W Version
-        cv2.rectangle(gray_display, (0, h-80), (w, h), (0, 0, 0), -1)
-        cv2.putText(gray_display, label_text, (20, h-30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.putText(gray_display, info_text, (20, h-60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        
-        if recording:
-            now = time.time()
-            if int(now * 2) % 2 == 0:
-                cv2.circle(gray_display, (30, 30), 10, (0, 0, 255), -1)
-            cv2.putText(gray_display, "REC", (50, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        else:
-            cv2.putText(gray_display, "PAUSE (Leertaste zum Starten)", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
-        cv2.imshow("Lehrer Modus - FARBE", display)
-        cv2.imshow("Lehrer Modus - S/W", gray_display)
+        cv2.imshow("Lehrer Modus - S/W", display)
 
         # --- TASTENSTEUERUNG ---
         key = cv2.waitKey(1) & 0xFF
@@ -147,9 +134,15 @@ def manual_data_collection():
         if key == ord(' '): # Leertaste: Start/Stop
             recording = not recording
             if recording:
-                start_time = time.time() # Reset Timer bei neuem Start
+                now = time.time()
+                if recording_start_time is None:
+                    recording_start_time = now
+                if paused_at is not None:
+                    total_pause += now - paused_at
+                    paused_at = None
                 print("▶️ Aufnahme gestartet!")
             else:
+                paused_at = time.time()
                 print("⏸️ Pausiert.")
         
         # Label Tasten 0-4

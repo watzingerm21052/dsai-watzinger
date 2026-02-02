@@ -14,7 +14,7 @@ from pathlib import Path
 import sys
 
 # ================= PFADE =================
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent
 MODELS_DIR = BASE_DIR / "models"
 MODEL_PATH = MODELS_DIR / "toast_model.pt"
 
